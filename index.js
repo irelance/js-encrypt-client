@@ -3,10 +3,10 @@ const fs = require('fs');
 const os = require('os');
 const JSZip = require("jszip");
 const crypto = require('crypto');
-const got = require('got');
 
 function onEnd(remote, appId, token) {
-    return got.post(`${remote}/encrypt/end`, {
+    return fetch(`${remote}/encrypt/end`, {
+        method: 'post',
         headers: {
             'app-id': appId,
             token,
@@ -45,7 +45,7 @@ function isType(type) {
 const isArray = isType('Array');
 
 function appendItem(itemMap, entry, filePath, type, recursive) {
-    if (TYPE.NODE !== type) type = TYPE.BROWSER;
+    if (!type) type = TYPE.BROWSER;
     if (!fs.existsSync(filePath)) return;
     let state = fs.statSync(filePath);
     if (state.isFile()) {
@@ -74,10 +74,26 @@ function configWithDefault(config) {
     if (!config.appSecret) throw new Error('config.appSecret is not defined!');
     if (!config.output) config.output = config.entry;
     if ('boolean' !== typeof config.packageAll) config.packageAll = true;
-    if (TYPE.NODE !== config.type) config.type = TYPE.BROWSER;
+    if (!config.type) config.type = TYPE.BROWSER;
     if (!isArray(config.dirs)) config.dirs = [];
     if (!isArray(config.files)) config.files = [];
     return config;
+}
+
+function getItemMap(config) {
+    config = configWithDefault(config);
+    const itemMap = {};
+    if (config.packageAll) {
+        appendItem(itemMap, config.entry, config.entry, config.type, true);
+    }
+    config.dirs.forEach(dir => {
+        appendItem(itemMap, config.entry, dir.name, dir.type, dir.recursive);
+    });
+
+    config.files.forEach(file => {
+        appendItem(itemMap, config.entry, file.name, file.type, false);
+    });
+    return itemMap
 }
 
 function encrypt(config) {
@@ -86,18 +102,7 @@ function encrypt(config) {
         let cacheHash = crypto.createHash('sha256').update(config.entry).digest().toString('hex');
         const cacheConfigFile = path.resolve(CACHE_ROOT, `${config.appId}-${cacheHash}`);
 
-        let itemMap = {};
-
-        if (config.packageAll) {
-            appendItem(itemMap, config.entry, config.entry, config.type, true);
-        }
-        config.dirs.forEach(dir => {
-            appendItem(itemMap, config.entry, dir.name, dir.type, dir.recursive);
-        });
-
-        config.files.forEach(file => {
-            appendItem(itemMap, config.entry, file.name, file.type, false);
-        });
+        const itemMap = getItemMap(config);
 
         let configJson = {};
         configJson.items = Object.entries(itemMap).map(([k, v]) => v);
@@ -141,14 +146,15 @@ function encrypt(config) {
                 if (!cacheConfig.token) isNew = true;//no token must be new mission
                 if (!isNew) {
                     //send check token to verify if expired, if expired isNew=true and send end
-                    const onState = await got.post(`${config.remote}/encrypt/token/state`, {
+                    const onState = await fetch(`${config.remote}/encrypt/token/state`, {
+                        method: 'post',
                         headers: {
                             'app-id': config.appId,
                             token: cacheConfig.token,
                         },
-                        responseType: 'json'
                     });
-                    if (200 !== onState.statusCode || 0 !== onState.body.code) {
+                    const body = await onState.json()
+                    if (200 !== onState.status || 0 !== body.code) {
                         await onEnd(config.remote, config.appId, cacheConfig.token);
                         isNew = true;
                     }
@@ -160,16 +166,17 @@ function encrypt(config) {
                 }
 
                 if (isNew) {
-                    const getToken = await got.post(`${config.remote}/encrypt/getToken`, {
+                    const getToken = await fetch(`${config.remote}/encrypt/getToken`, {
+                        method: 'post',
                         headers: {
                             'app-id': config.appId,
                             'app-secret': config.appSecret,
                         },
-                        responseType: 'json'
                     });
-                    if (200 !== getToken.statusCode) throw new Error(`no token, with HTTP statusCode: ${getToken.statusCode}`);
-                    if (0 !== getToken.body.code || !getToken.body.data || !getToken.body.data.token) throw new Error(`no token, code: ${getToken.body.code}`);
-                    cacheConfig.token = getToken.body.data.token;
+                    if (200 !== getToken.status) throw new Error(`no token, with HTTP statusCode: ${getToken.status}`);
+                    const body = await getToken.json()
+                    if (0 !== body.code || !body.data || !body.data.token) throw new Error(`no token, code: ${body.code}`);
+                    cacheConfig.token = body.data.token;
                     cacheConfig.step = STEP.TOKEN;
                     cacheConfig.filesHash = filesHash;
                     fs.writeFileSync(cacheConfigFile, JSON.stringify(cacheConfig));
@@ -178,20 +185,22 @@ function encrypt(config) {
                 token = cacheConfig.token;
                 const total = Math.ceil(content.length / chunkSize);
                 if (cacheConfig.step === STEP.TOKEN) {
-                    const onCreate = await got.post(`${config.remote}/upload/create`, {
+                    const onCreate = await fetch(`${config.remote}/upload/create`, {
+                        method: 'post',
                         headers: {
                             'app-id': config.appId,
                             token,
+                            'content-type': 'application/json',
                         },
-                        json: {
+                        body: JSON.stringify({
                             hash: fileHash,
                             size: content.length,
                             chunkSize,
                             total,
-                        },
-                        responseType: 'json'
+                        }),
                     });
-                    if (200 !== onCreate.statusCode || 0 !== onCreate.body.code) throw new Error('create failed');
+                    const body = await onCreate.json()
+                    if (200 !== onCreate.status || 0 !== body.code) throw new Error('create failed');
                     cacheConfig.step = STEP.CREATE_HASH;
                     fs.writeFileSync(cacheConfigFile, JSON.stringify(cacheConfig));
                 }
@@ -203,7 +212,8 @@ function encrypt(config) {
                         const begin = current * chunkSize;
                         const end = Math.min(begin + chunkSize, content.length);
                         const chunk = content.slice(begin, end);
-                        const onChunk = await got.post(`${config.remote}/upload/chunk`, {
+                        const onChunk = await fetch(`${config.remote}/upload/chunk`, {
+                            method: 'post',
                             headers: {
                                 'app-id': config.appId,
                                 'chunk-id': current,
@@ -212,18 +222,18 @@ function encrypt(config) {
                                 'content-type': 'application/octet-stream',
                             },
                             body: chunk,
-                            responseType: 'json'
                         });
-                        if (200 !== onChunk.statusCode || 0 !== onChunk.body.code) {
+                        const body = await onChunk.json()
+                        if (200 !== onChunk.status || 0 !== body.code) {
                             if (tries > chunkMaxTry) {
-                                if (200 !== onChunk.statusCode) throw new Error(`chunk failed, with HTTP statusCode: ${onChunk.statusCode}`);
-                                throw new Error(`chunk failed, code: ${onChunk.body.code}`);
+                                if (200 !== onChunk.status) throw new Error(`chunk failed, with HTTP statusCode: ${onChunk.status}`);
+                                throw new Error(`chunk failed, code: ${body.code}`);
                             }
-                            if (2 === onChunk.body.code) current = onChunk.body.data.current;
+                            if (2 === body.code) current = body.data.current;
                             tries++;
                             continue;
                         }
-                        current = onChunk.body.data.current;
+                        current = body.data.current;
                         cacheConfig.current = current;
                         fs.writeFileSync(cacheConfigFile, JSON.stringify(cacheConfig));
                     }
@@ -232,14 +242,15 @@ function encrypt(config) {
                 }
                 //打包
                 if (cacheConfig.step === STEP.UPLOADED) {
-                    const onEncrypt = await got.post(`${config.remote}/encrypt/start`, {
+                    const onEncrypt = await fetch(`${config.remote}/encrypt/start`, {
+                        method: 'post',
                         headers: {
                             'app-id': config.appId,
                             token,
                         },
-                        responseType: 'json'
                     });
-                    if (200 !== onEncrypt.statusCode || 0 !== onEncrypt.body.code) throw new Error('encrypt failed on start');
+                    const body = await onEncrypt.json()
+                    if (200 !== onEncrypt.status || 0 !== body.code) throw new Error('encrypt failed on start');
                     cacheConfig.step = STEP.ENCRYPT_START;
                     fs.writeFileSync(cacheConfigFile, JSON.stringify(cacheConfig));
                 }
@@ -250,16 +261,17 @@ function encrypt(config) {
                     let timeout = 2000;
                     while (!finish) {
                         await new Promise(r => setTimeout(r, timeout));
-                        const onState = await got.post(`${config.remote}/encrypt/state`, {
+                        const onState = await fetch(`${config.remote}/encrypt/state`, {
+                            method: 'post',
                             headers: {
                                 'app-id': config.appId,
                                 token,
                             },
-                            responseType: 'json'
                         });
-                        if (200 !== onState.statusCode || 0 !== onState.body.code) throw new Error('encrypt failed on pending');
-                        process = onState.body.data.process;
-                        finish = onState.body.data.finish;
+                        const body = await onState.json()
+                        if (200 !== onState.status || 0 !== body.code) throw new Error('encrypt failed on pending');
+                        process = body.data.process;
+                        finish = body.data.finish;
                         console.log(`process: ${process}%`);
                     }
                     cacheConfig.step = STEP.FINISH;
@@ -268,16 +280,17 @@ function encrypt(config) {
                 //下载
                 if (cacheConfig.step === STEP.FINISH) {
                     console.log('downloading...');
-                    const onDownload = await got.post(`${config.remote}/encrypt/download`, {
+                    const onDownload = await fetch(`${config.remote}/encrypt/download`, {
+                        method: 'post',
                         headers: {
                             'app-id': config.appId,
                             token,
                         },
-                        responseType: 'buffer'
                     });
-                    if (200 !== onDownload.statusCode) throw new Error('download failed');
+                    if (200 !== onDownload.status) throw new Error('download failed');
+                    const body = await onDownload.arrayBuffer()
                     //解压
-                    JSZip.loadAsync(onDownload.body)
+                    JSZip.loadAsync(body)
                         .then(zip => {
                             const files = zip.files;
                             const basepath = config.output;
@@ -313,4 +326,4 @@ function encrypt(config) {
     });
 }
 
-module.exports = {encrypt};
+module.exports = {encrypt, getItemMap};

@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 const {Command} = require('commander');
-const got = require('got');
 const readline = require('readline');
 
 function readSyncByRl(tips) {
@@ -46,15 +45,16 @@ program
         url.username = '';
         url.password = '';
         url.pathname = '/encrypt/stopAll';
-        const onStopAll = await got.post(url.toString(), {
+        const onStopAll = await fetch(url.toString(), {
+            method: 'post',
             headers: {
                 'app-id': appId,
                 'app-secret': appSecret,
-            },
-            responseType: 'json'
+            }
         });
-        if (200 !== onStopAll.statusCode) throw new Error(`stopAll failed with HTTP statusCode: ${onStopAll.statusCode}`);
-        if (0 !== onStopAll.body.code) throw new Error(`stopAll failed with code: ${onStopAll.body.code}`);
+        const body= await onStopAll.json()
+        if (200 !== onStopAll.status) throw new Error(`stopAll failed with HTTP statusCode: ${onStopAll.status}`);
+        if (0 !== body.code) throw new Error(`stopAll failed with code: ${body.code}`);
         console.log('ok!');
     });
 
